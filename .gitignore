@@ -1,0 +1,34 @@
+# Ignore Python compiled files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+
+# Ignore virtual environment directories
+venv/
+ENV/
+env/
+.venv/
+
+# Ignore build and dist directories created by build tools
+build/
+dist/
+
+# Ignore PyInstaller generated files
+*.spec
+*.exe
+*.pkg
+*.toc
+*.zip
+*.txt
+*.html
+
+# Ignore pipenv files
+Pipfile.lock
+
+# Ignore configuration files
+config.ini
+
+# Ignore local environment settings
+local.py
+.env
