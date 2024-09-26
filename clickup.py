@@ -322,8 +322,15 @@ class ClickUpApp(tk.Tk):
                 print(f"Time spent (milliseconds): {time_spent}")
                 
                 # Log the hours using the time spent
-                log_hours(self.api_token, task_id, start_time, end_time, time_spent)
-                print(f"Stopped tracking time for task, logged {time_spent / 3600000:.2f} hours")
+                success = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
+
+                if success:
+                    self.feedback_label.config(text="Hours logged successfully!", fg="green")
+                    # Schedule the feedback label to clear after 4 seconds (4000 milliseconds)
+                    self.after(4000, self.clear_feedback_label)
+                else:
+                    self.feedback_label.config(text="Failed to log hours.", fg="red")
+                    print(f"Stopped tracking time for task, logged {time_spent / 3600000:.2f} hours")
             else:
                 print("Invalid elapsed time, unable to log hours")
             
