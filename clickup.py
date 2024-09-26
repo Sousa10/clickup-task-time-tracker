@@ -3,6 +3,7 @@ import requests
 import time as time_module
 import os
 import random
+from tkinter import messagebox
 
 CONFIG_FILE = "config.ini"
 
@@ -155,6 +156,14 @@ class ClickUpApp(tk.Tk):
             self.show_task_logger()
         else:
             self.show_token_input()
+    
+    def initialize_ui(self):
+        # Refresh button to reload tasks
+        self.refresh_button = tk.Button(self, text="Refresh Tasks", command=self.load_tasks, bg="#4CAF50", fg="white",  width=30, height=2)
+        self.refresh_button.grid(row=0, column=0, padx=10, pady=10)
+    
+    def load_tasks(self):
+        self.show_task_logger()
 
     def show_token_input(self):
         for widget in self.winfo_children():
@@ -182,19 +191,21 @@ class ClickUpApp(tk.Tk):
         self.feedback_label = tk.Label(self, text="", fg="green", font=('Helvetica', 10, 'bold'))
         self.feedback_label.grid(row=0, column=0, columnspan=6, pady=10)  # Add padding to place it nicely in the GUI
 
+        self.initialize_ui()  # Ensure UI elements like the refresh button are recreated
+
         user_id = get_user_id(self.api_token)
         if user_id:
             self.tasks = get_my_in_progress_tasks(self.api_token, user_id)
 
             # Calculate the required height based on the number of tasks
             num_tasks = len(self.tasks)
-            row_height = 50  # Height per row in pixels
+            row_height = 42  # Height per row in pixels
             header_height = 40  # Height for the header row
             total_height = header_height + (num_tasks * row_height)
             window_height = max(total_height, 300)  # Ensure a minimum height of 300 pixels
 
             self.title("ClickUp Task Time Logger")
-            self.geometry(f"720x{window_height}+700+400") # Set the window size to 400x400 pixels
+            self.geometry(f"800x{window_height}+700+400") # Set the window size to 400x400 pixels
             
             self.start_times = {}  # To store start times for each task
             self.elapsed_time_vars = {}  # To store elapsed time variables for each task
@@ -205,36 +216,56 @@ class ClickUpApp(tk.Tk):
             
             # Create a row for each task
             for row, (task_name, task_id) in enumerate(self.tasks, start=2):
-                tk.Label(self, text=task_name).grid(row=row, column=0, padx=5, pady=5)
-
-                manual_entry = tk.Entry(self)
-                manual_entry.grid(row=row, column=1, padx=5, pady=5)
-
-                log_button = tk.Button(self, text="Manual Hours", 
-                                       command=lambda t_id=task_id, entry=manual_entry: self.log_manual_hours(t_id, entry))
-                log_button.grid(row=row, column=2, padx=5, pady=5)
-                
-                start_button = tk.Button(self, text="Start", command=lambda t_id=task_id: self.start_tracking(t_id))
-                start_button.grid(row=row, column=3, padx=5, pady=5)
-                
-                stop_button = tk.Button(self, text="Stop", command=lambda t_id=task_id: self.stop_tracking(t_id))
-                stop_button.grid(row=row, column=4, padx=5, pady=5)
-                
-                
-                elapsed_time_var = tk.StringVar(self, value="00:00:00")
-                elapsed_time_label = tk.Label(self, textvariable=elapsed_time_var)
-                elapsed_time_label.grid(row=row, column=5, padx=5, pady=5)
-
-                # Store variables to reference later
-                self.start_times[task_id] = None
-                self.elapsed_time_vars[task_id] = elapsed_time_var
+                self.create_task_row(row, task_name, task_id)
         else:
             tk.Label(self, text="Failed to retrieve tasks").pack()
+    
+    def create_task_row(self, row, task_name, task_id):
+        tk.Label(self, text=task_name).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+
+        manual_entry = tk.Entry(self, fg='grey')
+        manual_entry.insert(0, 'Enter time as HH:MM')
+        manual_entry.bind("<FocusIn>", lambda event, e=manual_entry: self.clear_entry(e))
+        manual_entry.bind("<FocusOut>", lambda event, e=manual_entry: self.add_placeholder(e))
+
+        manual_entry.grid(row=row, column=1, padx=5, pady=5)
+
+        log_button = tk.Button(self, text="Manual Hours", 
+                                command=lambda t_id=task_id, entry=manual_entry: self.log_manual_hours(t_id, entry))
+        log_button.grid(row=row, column=2, padx=5, pady=5)
+        
+        start_button = tk.Button(self, text="Start", command=lambda t_id=task_id: self.start_tracking(t_id))
+        start_button.grid(row=row, column=3, padx=5, pady=5)
+        
+        stop_button = tk.Button(self, text="Stop", command=lambda t_id=task_id: self.stop_tracking(t_id))
+        stop_button.grid(row=row, column=4, padx=5, pady=5)
+        
+        
+        elapsed_time_var = tk.StringVar(self, value="00:00:00")
+        elapsed_time_label = tk.Label(self, textvariable=elapsed_time_var)
+        elapsed_time_label.grid(row=row, column=5, padx=5, pady=5)
+
+        # Store variables to reference later
+        self.start_times[task_id] = None
+        self.elapsed_time_vars[task_id] = elapsed_time_var
+
+    def clear_entry(self, entry):
+        """Clears the entry if it contains the default placeholder text."""
+        if entry.get() == 'Enter time as HH:MM' and entry.cget('fg') == 'grey':
+            entry.delete(0, tk.END)
+            entry.config(fg='black')  # Change text color to black when user focuses
+
+    def add_placeholder(self, entry):
+        """Adds placeholder text if the entry is empty."""
+        if not entry.get():
+            entry.config(fg='grey')
+            entry.insert(0, 'Enter time as HH:MM')
 
     def log_manual_hours(self, task_id, entry):
-        try:
-            hours = float(entry.get())
-            time_spent = int(hours * 3600000)  # Convert hours to milliseconds
+        time_str = entry.get()
+        if self.validate_time(time_str):
+            hours, minutes = map(int, time_str.split(':'))
+            time_spent = hours * 3600 * 1000 + minutes * 60 * 1000  # Convert to milliseconds
 
             # Retrieve existing time entries for the task
             existing_entries = get_existing_time_entries(self.api_token, task_id)
@@ -242,7 +273,7 @@ class ClickUpApp(tk.Tk):
             # Find a suitable time gap to log the new entry
             start_time, end_time = find_time_gap(existing_entries, time_spent)
             
-            print(f"Logging {hours} hours from {start_time} to {end_time}")
+            print(f"Logging {hours} hours and {minutes} minutes from {start_time} to {end_time}")
 
             success = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
 
@@ -256,12 +287,17 @@ class ClickUpApp(tk.Tk):
 
             # Schedule the feedback label to clear after 4 seconds (4000 milliseconds)
             self.after(4000, self.clear_feedback_label)
+        else:
+            messagebox.showerror("Invalid Time", "Please enter time in HH:MM format.")
         
-        # Clear the input field after lo
+    def validate_time(self, time_str):
+        try:
+            hours, minutes = map(int, time_str.split(':'))
+            if 0 <= hours < 24 and 0 <= minutes < 60:
+                return True
         except ValueError:
-            self.feedback_label.config(text="Please enter a valid number of hours.", fg="red")
-            # Schedule the feedback label to clear after 4 seconds (4000 milliseconds)
-            self.after(4000, self.clear_feedback_label)
+            pass
+        return False
     
     def clear_feedback_label(self):
         self.feedback_label.config(text="")
