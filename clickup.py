@@ -2,15 +2,12 @@ import tkinter as tk
 import requests
 import time as time_module
 import os
-import random
 from tkinter import messagebox
 
 CONFIG_FILE = "config.ini"
 
-# ClickUp API token and workspace ID
-API_TOKEN = 'pk_38555740_DWH1WXKC9FX2JT9MDYQXE2C5PRLQJGC9'
+# ClickUp workspace ID
 WORKSPACE_ID = '37266601'
-headers = {"Authorization": API_TOKEN}
 
 # Get your user ID
 def get_user_id(api_token):
@@ -60,57 +57,95 @@ def load_api_token():
             return f.read().strip()
     return None
     
+def parse_clickup_error(response):
+    try:
+        error = response.json()
+    except ValueError:
+        return response.text or f"HTTP {response.status_code}"
+
+    if isinstance(error, dict):
+        if error.get("err"):
+            return error["err"]
+        if error.get("message"):
+            return error["message"]
+
+    return str(error)
+
+
 # Log hours worked on a task
 def log_hours(api_token, task_id, start_time, end_time, time_spent):
-    url = f'https://api.clickup.com/api/v2/task/{task_id}/time'
+    url = f'https://api.clickup.com/api/v2/team/{WORKSPACE_ID}/time_entries'
 
-    # Calculate the current time for end, and start time by subtracting time_spent
-    # end_time = int(time_module.time() * 1000)  # Convert to milliseconds
-    # start_time = end_time - time_spent  # Calculate start time
     start_time = int(start_time)
     end_time = int(end_time)
+    time_spent = int(time_spent)
 
     # Ensure time_spent is within a valid range
     if not (0 < time_spent < 24 * 3600000):  # Less than 24 hours
-        print("Invalid time_spent value, not logging hours")
-        return
+        return False, "Invalid time duration."
 
     data = {
         'start': start_time,
-        'end': end_time,
-        'time': time_spent,  # Time spent in milliseconds
+        'duration': time_spent,  # Time spent in milliseconds
         'billable': True,
-        'description': 'Worked on task'
+        'description': 'Worked on task',
+        'tid': task_id
     }
-    headers = {"Authorization": api_token}
+    headers = {
+        "Authorization": api_token,
+        "Content-Type": "application/json"
+    }
     print("Request URL:", url)  # Print the URL
-    print("Request Headers:", headers)  # Print the headers
     print("Request Data:", data)  # Print the data being sent
 
-    response = requests.post(url, headers=headers, json=data)
-    
-    print("Response Status Code:", response.status_code)  # Print the status code
-    print("Response Content:", response.content)  # Print the content of the response
-    if response.status_code == 200:
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+    except requests.RequestException as exc:
+        message = f"Network error: {exc}"
+        print(message)
+        return False, message
+
+    print("Response Status Code:", response.status_code)
+    print("Response Content:", response.text)
+    if response.status_code in (200, 201):
         print("Hours logged successfully")
-        return True
-    else:
-        print("Failed to log hours", response.content)
-        return False
+        return True, "Hours logged successfully!"
+
+    message = parse_clickup_error(response)
+    print("Failed to log hours", message)
+    return False, message
 
 def get_existing_time_entries(api_token, task_id):
-    url = f'https://api.clickup.com/api/v2/task/{task_id}/time/'
-    headers = {"Authorization": api_token}
-    response = requests.get(url, headers=headers)
+    url = f'https://api.clickup.com/api/v2/team/{WORKSPACE_ID}/time_entries'
+    current_time = int(time_module.time() * 1000)
+    params = {
+        "task_id": task_id,
+        "start_date": current_time - (90 * 24 * 3600000),
+        "end_date": current_time + (90 * 24 * 3600000)
+    }
+    headers = {
+        "Authorization": api_token,
+        "Content-Type": "application/json"
+    }
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+    except requests.RequestException as exc:
+        print("Failed to retrieve time entries", exc)
+        return []
+
     if response.status_code == 200:
-        time_entries = response.json()['data']  # Hypothetical response structure
+        time_entries = response.json().get('data', [])
         print(f"Existing time entries for task {task_id}:")
         for entry in time_entries:
-            for interval in entry.get('intervals', []):
-                print(f"Start: {interval['start']}, End: {interval['end']}")
+            start = entry.get('start')
+            end = entry.get('end')
+            duration = entry.get('duration')
+            if start is not None and end is None and duration and duration > 0:
+                end = int(start) + int(duration)
+            print(f"Start: {start}, End: {end}")
         return time_entries 
     else:
-        print("Failed to retrieve time entries")
+        print("Failed to retrieve time entries", parse_clickup_error(response))
         return []
 
 # Function to find a non-overlapping time interval
@@ -118,6 +153,14 @@ def find_time_gap(existing_entries, time_spent):
     # Flatten the intervals from all entries
     all_intervals = []
     for entry in existing_entries:
+        start = entry.get('start')
+        end = entry.get('end')
+        duration = entry.get('duration')
+        if start is not None and end is None and duration and duration > 0:
+            end = int(start) + int(duration)
+        if start is not None and end is not None:
+            all_intervals.append({'start': int(start), 'end': int(end)})
+
         for interval in entry.get('intervals', []):
             start = interval.get('start')
             end = interval.get('end')
@@ -275,12 +318,12 @@ class ClickUpApp(tk.Tk):
             
             print(f"Logging {hours} hours and {minutes} minutes from {start_time} to {end_time}")
 
-            success = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
+            success, message = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
 
             if success:
-                self.feedback_label.config(text="Hours logged successfully!", fg="green")
+                self.feedback_label.config(text=message, fg="green")
             else:
-                self.feedback_label.config(text="Failed to log hours.", fg="red")
+                self.feedback_label.config(text=f"Failed to log hours: {message}", fg="red")
             
             # Clear the input field after logging
             entry.delete(0, tk.END)
@@ -322,14 +365,14 @@ class ClickUpApp(tk.Tk):
                 print(f"Time spent (milliseconds): {time_spent}")
                 
                 # Log the hours using the time spent
-                success = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
+                success, message = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
 
                 if success:
-                    self.feedback_label.config(text="Hours logged successfully!", fg="green")
+                    self.feedback_label.config(text=message, fg="green")
                     # Schedule the feedback label to clear after 4 seconds (4000 milliseconds)
                     self.after(4000, self.clear_feedback_label)
                 else:
-                    self.feedback_label.config(text="Failed to log hours.", fg="red")
+                    self.feedback_label.config(text=f"Failed to log hours: {message}", fg="red")
                     print(f"Stopped tracking time for task, logged {time_spent / 3600000:.2f} hours")
             else:
                 print("Invalid elapsed time, unable to log hours")
