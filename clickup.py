@@ -72,9 +72,24 @@ def parse_clickup_error(response):
     return str(error)
 
 
+def friendly_clickup_error(message):
+    message_lower = message.lower()
+    if "time tracking is not available" in message_lower:
+        return (
+            "Time Tracking is not available for this ClickUp workspace. "
+            "Ask a workspace owner/admin to enable the Time Tracking ClickApp or check the plan limits."
+        )
+    if "advanced time tracking" in message_lower:
+        return (
+            "This workspace reached its Advanced Time Tracking limit. "
+            "The app is using plain task time logging now; try again with the latest executable."
+        )
+    return message
+
+
 # Log hours worked on a task
 def log_hours(api_token, task_id, start_time, end_time, time_spent):
-    url = f'https://api.clickup.com/api/v2/team/{WORKSPACE_ID}/time_entries'
+    url = f'https://api.clickup.com/api/v2/task/{task_id}/time'
 
     start_time = int(start_time)
     end_time = int(end_time)
@@ -86,10 +101,8 @@ def log_hours(api_token, task_id, start_time, end_time, time_spent):
 
     data = {
         'start': start_time,
-        'duration': time_spent,  # Time spent in milliseconds
-        'billable': True,
-        'description': 'Worked on task',
-        'tid': task_id
+        'end': end_time,
+        'time': time_spent  # Time spent in milliseconds
     }
     headers = {
         "Authorization": api_token,
@@ -111,24 +124,18 @@ def log_hours(api_token, task_id, start_time, end_time, time_spent):
         print("Hours logged successfully")
         return True, "Hours logged successfully!"
 
-    message = parse_clickup_error(response)
+    message = friendly_clickup_error(parse_clickup_error(response))
     print("Failed to log hours", message)
     return False, message
 
 def get_existing_time_entries(api_token, task_id):
-    url = f'https://api.clickup.com/api/v2/team/{WORKSPACE_ID}/time_entries'
-    current_time = int(time_module.time() * 1000)
-    params = {
-        "task_id": task_id,
-        "start_date": current_time - (90 * 24 * 3600000),
-        "end_date": current_time + (90 * 24 * 3600000)
-    }
+    url = f'https://api.clickup.com/api/v2/task/{task_id}/time'
     headers = {
         "Authorization": api_token,
         "Content-Type": "application/json"
     }
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response = requests.get(url, headers=headers, timeout=30)
     except requests.RequestException as exc:
         print("Failed to retrieve time entries", exc)
         return []
@@ -231,8 +238,8 @@ class ClickUpApp(tk.Tk):
             widget.destroy()
         
         # Create feedback label for user messages
-        self.feedback_label = tk.Label(self, text="", fg="green", font=('Helvetica', 10, 'bold'))
-        self.feedback_label.grid(row=0, column=0, columnspan=6, pady=10)  # Add padding to place it nicely in the GUI
+        self.feedback_label = tk.Label(self, text="", fg="green", font=('Helvetica', 10, 'bold'), anchor="w")
+        self.feedback_label.grid(row=0, column=1, columnspan=5, padx=10, pady=10, sticky="w")
 
         self.initialize_ui()  # Ensure UI elements like the refresh button are recreated
 
@@ -261,7 +268,12 @@ class ClickUpApp(tk.Tk):
             for row, (task_name, task_id) in enumerate(self.tasks, start=2):
                 self.create_task_row(row, task_name, task_id)
         else:
-            tk.Label(self, text="Failed to retrieve tasks").pack()
+            tk.Label(
+                self,
+                text="Failed to retrieve tasks. Check the API token, network, and ClickUp access.",
+                fg="red",
+                font=('Helvetica', 10, 'bold')
+            ).grid(row=1, column=0, columnspan=6, padx=10, pady=20)
     
     def create_task_row(self, row, task_name, task_id):
         tk.Label(self, text=task_name).grid(row=row, column=0, padx=5, pady=5, sticky="w")
