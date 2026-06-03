@@ -238,8 +238,16 @@ class ClickUpApp(tk.Tk):
             widget.destroy()
         
         # Create feedback label for user messages
-        self.feedback_label = tk.Label(self, text="", fg="green", font=('Helvetica', 10, 'bold'), anchor="w")
-        self.feedback_label.grid(row=0, column=1, columnspan=5, padx=10, pady=10, sticky="w")
+        self.feedback_label = tk.Label(
+            self,
+            text="",
+            fg="green",
+            font=('Helvetica', 10, 'bold'),
+            anchor="w",
+            justify="left",
+            wraplength=760
+        )
+        self.feedback_label.grid(row=1, column=0, columnspan=6, padx=10, pady=(0, 10), sticky="ew")
 
         self.initialize_ui()  # Ensure UI elements like the refresh button are recreated
 
@@ -250,22 +258,22 @@ class ClickUpApp(tk.Tk):
             # Calculate the required height based on the number of tasks
             num_tasks = len(self.tasks)
             row_height = 42  # Height per row in pixels
-            header_height = 40  # Height for the header row
+            header_height = 90  # Space for the header row and wrapped feedback message
             total_height = header_height + (num_tasks * row_height)
             window_height = max(total_height, 300)  # Ensure a minimum height of 300 pixels
 
             self.title("ClickUp Task Time Logger")
-            self.geometry(f"800x{window_height}+700+400") # Set the window size to 400x400 pixels
+            self.geometry(f"820x{window_height}+700+400")
             
             self.start_times = {}  # To store start times for each task
             self.elapsed_time_vars = {}  # To store elapsed time variables for each task
             # Create headers for the table
             headers = ["Task", "Manual Hours", "Log Manual Hours", "Start", "Stop", "Elapsed Time"]
             for col, header in enumerate(headers):
-                tk.Label(self, text=header, font=('Helvetica', 10, 'bold')).grid(row=1, column=col, padx=5, pady=5)
+                tk.Label(self, text=header, font=('Helvetica', 10, 'bold')).grid(row=2, column=col, padx=5, pady=5)
             
             # Create a row for each task
-            for row, (task_name, task_id) in enumerate(self.tasks, start=2):
+            for row, (task_name, task_id) in enumerate(self.tasks, start=3):
                 self.create_task_row(row, task_name, task_id)
         else:
             tk.Label(
@@ -273,7 +281,7 @@ class ClickUpApp(tk.Tk):
                 text="Failed to retrieve tasks. Check the API token, network, and ClickUp access.",
                 fg="red",
                 font=('Helvetica', 10, 'bold')
-            ).grid(row=1, column=0, columnspan=6, padx=10, pady=20)
+            ).grid(row=2, column=0, columnspan=6, padx=10, pady=20)
     
     def create_task_row(self, row, task_name, task_id):
         tk.Label(self, text=task_name).grid(row=row, column=0, padx=5, pady=5, sticky="w")
