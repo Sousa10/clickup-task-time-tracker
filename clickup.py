@@ -2,12 +2,28 @@ import tkinter as tk
 import requests
 import time as time_module
 import os
+import configparser
+from datetime import datetime, timezone
 from tkinter import messagebox
 
 CONFIG_FILE = "config.ini"
+SUPABASE_REST_TIMEOUT = 30
 
 # ClickUp workspace ID
 WORKSPACE_ID = '37266601'
+
+
+def utc_iso_from_ms(timestamp_ms):
+    return datetime.fromtimestamp(int(timestamp_ms) / 1000, timezone.utc).isoformat()
+
+
+def normalize_supabase_url(url):
+    normalized_url = url.strip().strip('"').strip("'").rstrip("/")
+    for suffix in ("/rest/v1", "/rest"):
+        if normalized_url.endswith(suffix):
+            normalized_url = normalized_url[:-len(suffix)]
+            break
+    return normalized_url.rstrip("/")
 
 # Get your user ID
 def get_user_id(api_token):
@@ -45,19 +61,55 @@ def get_my_in_progress_tasks(api_token, user_id):
         print("Failed to retrieve tasks")
         return []
 
-# Save API token in a config file
-def save_api_token(api_token):
-    with open(CONFIG_FILE, "w") as f:
-        f.write(api_token)
+def default_config():
+    return {
+        "clickup_api_token": "",
+        "supabase_url": "",
+        "supabase_anon_key": ""
+    }
 
-# Load API token from config file
-def load_api_token():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
-            return f.read().strip()
-    return None
+
+def load_app_config():
+    config = default_config()
+    if not os.path.exists(CONFIG_FILE):
+        return config
+
+    with open(CONFIG_FILE, "r") as f:
+        content = f.read().strip()
+
+    if not content:
+        return config
+
+    # Backward compatibility with the old config.ini that contained only the ClickUp token.
+    if not content.startswith("["):
+        config["clickup_api_token"] = content
+        return config
+
+    parser = configparser.ConfigParser()
+    parser.read_string(content)
+    config["clickup_api_token"] = parser.get("clickup", "api_token", fallback="")
+    config["supabase_url"] = parser.get("supabase", "url", fallback="")
+    config["supabase_anon_key"] = parser.get("supabase", "anon_key", fallback="")
+    return config
+
+
+def save_app_config(config):
+    parser = configparser.ConfigParser()
+    parser["clickup"] = {
+        "api_token": config.get("clickup_api_token", "").strip()
+    }
+    parser["supabase"] = {
+        "url": normalize_supabase_url(config.get("supabase_url", "")),
+        "anon_key": config.get("supabase_anon_key", "").strip()
+    }
+    with open(CONFIG_FILE, "w") as f:
+        parser.write(f)
+
+
+def supabase_is_configured(config):
+    return bool(config.get("supabase_url") and config.get("supabase_anon_key"))
     
-def parse_clickup_error(response):
+def parse_api_error(response):
     try:
         error = response.json()
     except ValueError:
@@ -72,94 +124,155 @@ def parse_clickup_error(response):
     return str(error)
 
 
-def friendly_clickup_error(message):
+def friendly_supabase_error(message):
     message_lower = message.lower()
-    if "time tracking is not available" in message_lower:
-        return (
-            "Time Tracking is not available for this ClickUp workspace. "
-            "Ask a workspace owner/admin to enable the Time Tracking ClickApp or check the plan limits."
-        )
-    if "advanced time tracking" in message_lower:
-        return (
-            "This workspace reached its Advanced Time Tracking limit. "
-            "The app is using plain task time logging now; try again with the latest executable."
-        )
+    if "relation" in message_lower and "does not exist" in message_lower:
+        return "Supabase table is missing. Run the supabase_schema.sql script in your Supabase SQL editor."
+    if "invalid api key" in message_lower or "jwt" in message_lower:
+        return "Supabase credentials are invalid. Check the project URL and anon key in Settings."
+    if "invalid path specified" in message_lower:
+        return "Supabase URL looks wrong. In Settings, use only https://your-project-ref.supabase.co, without /rest/v1 or any extra path."
+    if "permission denied for table" in message_lower:
+        return "Supabase table permissions are missing. Rerun the latest supabase_schema.sql script in the Supabase SQL editor."
     return message
 
 
-# Log hours worked on a task
-def log_hours(api_token, task_id, start_time, end_time, time_spent):
-    url = f'https://api.clickup.com/api/v2/task/{task_id}/time'
+def supabase_headers(config, prefer=None):
+    headers = {
+        "apikey": config["supabase_anon_key"],
+        "Authorization": f"Bearer {config['supabase_anon_key']}",
+        "Content-Type": "application/json"
+    }
+    if prefer:
+        headers["Prefer"] = prefer
+    return headers
+
+
+def supabase_rest_url(config, table_name):
+    return f"{normalize_supabase_url(config['supabase_url'])}/rest/v1/{table_name}"
+
+
+def upsert_supabase_task(config, task_id, task_name):
+    url = supabase_rest_url(config, "tasks")
+    params = {"on_conflict": "clickup_task_id"}
+    data = {
+        "clickup_task_id": task_id,
+        "name": task_name,
+        "last_seen_at": datetime.now(timezone.utc).isoformat()
+    }
+
+    try:
+        response = requests.post(
+            url,
+            headers=supabase_headers(config, "resolution=merge-duplicates"),
+            params=params,
+            json=data,
+            timeout=SUPABASE_REST_TIMEOUT
+        )
+    except requests.RequestException as exc:
+        return False, f"Network error saving task to Supabase: {exc}"
+
+    if response.status_code in (200, 201, 204):
+        return True, "Task saved."
+
+    return False, friendly_supabase_error(parse_api_error(response))
+
+
+def save_time_entry(config, task_id, task_name, start_time, end_time, time_spent, source, user_id=None):
+    if not supabase_is_configured(config):
+        return False, "Supabase is not configured. Open Settings and add the Supabase URL and anon key."
 
     start_time = int(start_time)
     end_time = int(end_time)
     time_spent = int(time_spent)
 
-    # Ensure time_spent is within a valid range
     if not (0 < time_spent < 24 * 3600000):  # Less than 24 hours
         return False, "Invalid time duration."
 
+    success, message = upsert_supabase_task(config, task_id, task_name)
+    if not success:
+        return False, message
+
+    url = supabase_rest_url(config, "time_entries")
     data = {
-        'start': start_time,
-        'end': end_time,
-        'time': time_spent  # Time spent in milliseconds
+        "clickup_task_id": task_id,
+        "task_name": task_name,
+        "clickup_user_id": str(user_id) if user_id else None,
+        "start_time": utc_iso_from_ms(start_time),
+        "end_time": utc_iso_from_ms(end_time),
+        "start_ms": start_time,
+        "end_ms": end_time,
+        "duration_ms": time_spent,
+        "duration_minutes": round(time_spent / 60000, 2),
+        "source": source
     }
-    headers = {
-        "Authorization": api_token,
-        "Content-Type": "application/json"
-    }
-    print("Request URL:", url)  # Print the URL
-    print("Request Data:", data)  # Print the data being sent
+    print("Supabase Request URL:", url)
+    print("Supabase Request Data:", data)
 
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(
+            url,
+            headers=supabase_headers(config, "return=representation"),
+            json=data,
+            timeout=SUPABASE_REST_TIMEOUT
+        )
     except requests.RequestException as exc:
-        message = f"Network error: {exc}"
+        message = f"Network error saving time to Supabase: {exc}"
         print(message)
         return False, message
 
-    print("Response Status Code:", response.status_code)
-    print("Response Content:", response.text)
-    if response.status_code in (200, 201):
-        print("Hours logged successfully")
-        return True, "Hours logged successfully!"
+    print("Supabase Response Status Code:", response.status_code)
+    print("Supabase Response Content:", response.text)
+    if response.status_code in (200, 201, 204):
+        print("Hours saved successfully")
+        return True, "Hours saved to Supabase!"
 
-    message = friendly_clickup_error(parse_clickup_error(response))
-    print("Failed to log hours", message)
+    message = friendly_supabase_error(parse_api_error(response))
+    print("Failed to save hours", message)
     return False, message
 
-def get_existing_time_entries(api_token, task_id):
-    url = f'https://api.clickup.com/api/v2/task/{task_id}/time'
-    headers = {
-        "Authorization": api_token,
-        "Content-Type": "application/json"
+
+def get_existing_time_entries(config, task_id):
+    if not supabase_is_configured(config):
+        return []
+
+    url = supabase_rest_url(config, "time_entries")
+    params = {
+        "select": "start_ms,end_ms,duration_ms",
+        "clickup_task_id": f"eq.{task_id}",
+        "order": "start_ms.asc"
     }
     try:
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(
+            url,
+            headers=supabase_headers(config),
+            params=params,
+            timeout=SUPABASE_REST_TIMEOUT
+        )
     except requests.RequestException as exc:
-        print("Failed to retrieve time entries", exc)
+        print("Failed to retrieve Supabase time entries", exc)
         return []
 
     if response.status_code == 200:
-        time_entries = response.json().get('data', [])
-        print(f"Existing time entries for task {task_id}:")
-        for entry in time_entries:
-            start = entry.get('start')
-            end = entry.get('end')
-            duration = entry.get('duration')
-            if start is not None and end is None and duration and duration > 0:
-                end = int(start) + int(duration)
-            print(f"Start: {start}, End: {end}")
-        return time_entries 
-    else:
-        print("Failed to retrieve time entries", parse_clickup_error(response))
-        return []
+        entries = response.json()
+        print(f"Existing Supabase time entries for task {task_id}:")
+        for entry in entries:
+            print(f"Start: {entry.get('start_ms')}, End: {entry.get('end_ms')}")
+        return entries
+
+    print("Failed to retrieve Supabase time entries", friendly_supabase_error(parse_api_error(response)))
+    return []
 
 # Function to find a non-overlapping time interval
 def find_time_gap(existing_entries, time_spent):
     # Flatten the intervals from all entries
     all_intervals = []
     for entry in existing_entries:
+        start_ms = entry.get('start_ms')
+        end_ms = entry.get('end_ms')
+        if start_ms is not None and end_ms is not None:
+            all_intervals.append({'start': int(start_ms), 'end': int(end_ms)})
+
         start = entry.get('start')
         end = entry.get('end')
         duration = entry.get('duration')
@@ -197,40 +310,69 @@ def find_time_gap(existing_entries, time_spent):
 class ClickUpApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.api_token = load_api_token()
-
-        # Example button that triggers the log_manual_hours function
-        tk.Button(self, text="Log Hours", command=lambda: self.log_manual_hours("task_id", self.manual_entry)).pack(pady=10)
+        self.app_config = load_app_config()
+        self.api_token = self.app_config.get("clickup_api_token", "")
+        self.current_user_id = None
+        self.task_names = {}
         
-        if self.api_token:
+        if self.api_token and supabase_is_configured(self.app_config):
             self.show_task_logger()
         else:
-            self.show_token_input()
+            self.show_config_input()
     
     def initialize_ui(self):
         # Refresh button to reload tasks
-        self.refresh_button = tk.Button(self, text="Refresh Tasks", command=self.load_tasks, bg="#4CAF50", fg="white",  width=30, height=2)
+        self.refresh_button = tk.Button(self, text="Refresh Tasks", command=self.load_tasks, bg="#4CAF50", fg="white", width=30, height=2)
         self.refresh_button.grid(row=0, column=0, padx=10, pady=10)
+
+        self.settings_button = tk.Button(self, text="Settings", command=self.show_config_input, width=12, height=2)
+        self.settings_button.grid(row=0, column=1, padx=5, pady=10, sticky="w")
     
     def load_tasks(self):
         self.show_task_logger()
 
-    def show_token_input(self):
+    def show_config_input(self):
         for widget in self.winfo_children():
             widget.destroy()
-        self.title("Enter ClickUp API Token")
-        self.geometry("300x150")
+        self.title("App Settings")
+        self.geometry("580x260")
 
-        tk.Label(self, text="Enter your ClickUp API Token:").pack(pady=10)
+        tk.Label(self, text="ClickUp API Token:").grid(row=0, column=0, padx=10, pady=10, sticky="e")
         self.token_entry = tk.Entry(self, show="*")
-        self.token_entry.pack(pady=5)
+        self.token_entry.insert(0, self.app_config.get("clickup_api_token", ""))
+        self.token_entry.grid(row=0, column=1, padx=10, pady=10, sticky="ew")
 
-        tk.Button(self, text="Save Token", command=self.save_and_proceed).pack(pady=10)
+        tk.Label(self, text="Supabase URL:").grid(row=1, column=0, padx=10, pady=10, sticky="e")
+        self.supabase_url_entry = tk.Entry(self)
+        self.supabase_url_entry.insert(0, self.app_config.get("supabase_url", ""))
+        self.supabase_url_entry.grid(row=1, column=1, padx=10, pady=10, sticky="ew")
+
+        tk.Label(self, text="Supabase Anon Key:").grid(row=2, column=0, padx=10, pady=10, sticky="e")
+        self.supabase_key_entry = tk.Entry(self, show="*")
+        self.supabase_key_entry.insert(0, self.app_config.get("supabase_anon_key", ""))
+        self.supabase_key_entry.grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+
+        tk.Button(self, text="Save Settings", command=self.save_and_proceed, bg="#4CAF50", fg="white").grid(row=3, column=1, padx=10, pady=15, sticky="e")
+
+        self.columnconfigure(1, weight=1)
 
     def save_and_proceed(self):
-        self.api_token = self.token_entry.get()
+        self.app_config = {
+            "clickup_api_token": self.token_entry.get().strip(),
+            "supabase_url": normalize_supabase_url(self.supabase_url_entry.get()),
+            "supabase_anon_key": self.supabase_key_entry.get().strip()
+        }
+        self.api_token = self.app_config["clickup_api_token"]
+
+        if not self.api_token:
+            messagebox.showerror("Missing Setting", "Please enter the ClickUp API token.")
+            return
+        if not supabase_is_configured(self.app_config):
+            messagebox.showerror("Missing Setting", "Please enter the Supabase URL and anon key.")
+            return
+
+        save_app_config(self.app_config)
         if self.api_token:
-            save_api_token(self.api_token)
             self.show_task_logger()
         
     def show_task_logger(self):
@@ -253,6 +395,7 @@ class ClickUpApp(tk.Tk):
 
         user_id = get_user_id(self.api_token)
         if user_id:
+            self.current_user_id = user_id
             self.tasks = get_my_in_progress_tasks(self.api_token, user_id)
 
             # Calculate the required height based on the number of tasks
@@ -267,6 +410,7 @@ class ClickUpApp(tk.Tk):
             
             self.start_times = {}  # To store start times for each task
             self.elapsed_time_vars = {}  # To store elapsed time variables for each task
+            self.task_names = {}  # To store task names by ClickUp task ID
             # Create headers for the table
             headers = ["Task", "Manual Hours", "Log Manual Hours", "Start", "Stop", "Elapsed Time"]
             for col, header in enumerate(headers):
@@ -285,6 +429,7 @@ class ClickUpApp(tk.Tk):
     
     def create_task_row(self, row, task_name, task_id):
         tk.Label(self, text=task_name).grid(row=row, column=0, padx=5, pady=5, sticky="w")
+        self.task_names[task_id] = task_name
 
         manual_entry = tk.Entry(self, fg='grey')
         manual_entry.insert(0, 'Enter time as HH:MM')
@@ -294,7 +439,7 @@ class ClickUpApp(tk.Tk):
         manual_entry.grid(row=row, column=1, padx=5, pady=5)
 
         log_button = tk.Button(self, text="Manual Hours", 
-                                command=lambda t_id=task_id, entry=manual_entry: self.log_manual_hours(t_id, entry))
+                                command=lambda t_id=task_id, t_name=task_name, entry=manual_entry: self.log_manual_hours(t_id, t_name, entry))
         log_button.grid(row=row, column=2, padx=5, pady=5)
         
         start_button = tk.Button(self, text="Start", command=lambda t_id=task_id: self.start_tracking(t_id))
@@ -324,26 +469,35 @@ class ClickUpApp(tk.Tk):
             entry.config(fg='grey')
             entry.insert(0, 'Enter time as HH:MM')
 
-    def log_manual_hours(self, task_id, entry):
+    def log_manual_hours(self, task_id, task_name, entry):
         time_str = entry.get()
         if self.validate_time(time_str):
             hours, minutes = map(int, time_str.split(':'))
             time_spent = hours * 3600 * 1000 + minutes * 60 * 1000  # Convert to milliseconds
 
             # Retrieve existing time entries for the task
-            existing_entries = get_existing_time_entries(self.api_token, task_id)
+            existing_entries = get_existing_time_entries(self.app_config, task_id)
             
             # Find a suitable time gap to log the new entry
             start_time, end_time = find_time_gap(existing_entries, time_spent)
             
             print(f"Logging {hours} hours and {minutes} minutes from {start_time} to {end_time}")
 
-            success, message = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
+            success, message = save_time_entry(
+                self.app_config,
+                task_id,
+                task_name,
+                start_time,
+                end_time,
+                time_spent,
+                "manual",
+                self.current_user_id
+            )
 
             if success:
                 self.feedback_label.config(text=message, fg="green")
             else:
-                self.feedback_label.config(text=f"Failed to log hours: {message}", fg="red")
+                self.feedback_label.config(text=f"Failed to save hours: {message}", fg="red")
             
             # Clear the input field after logging
             entry.delete(0, tk.END)
@@ -384,16 +538,27 @@ class ClickUpApp(tk.Tk):
                 print(f"Elapsed time (seconds): {elapsed_seconds}")
                 print(f"Time spent (milliseconds): {time_spent}")
                 
-                # Log the hours using the time spent
-                success, message = log_hours(self.api_token, task_id, start_time, end_time, time_spent)
+                task_name = self.task_names.get(task_id, task_id)
+
+                # Save the hours using the time spent
+                success, message = save_time_entry(
+                    self.app_config,
+                    task_id,
+                    task_name,
+                    start_time,
+                    end_time,
+                    time_spent,
+                    "timer",
+                    self.current_user_id
+                )
 
                 if success:
                     self.feedback_label.config(text=message, fg="green")
                     # Schedule the feedback label to clear after 4 seconds (4000 milliseconds)
                     self.after(4000, self.clear_feedback_label)
                 else:
-                    self.feedback_label.config(text=f"Failed to log hours: {message}", fg="red")
-                    print(f"Stopped tracking time for task, logged {time_spent / 3600000:.2f} hours")
+                    self.feedback_label.config(text=f"Failed to save hours: {message}", fg="red")
+                    print(f"Stopped tracking time for task, measured {time_spent / 3600000:.2f} hours")
             else:
                 print("Invalid elapsed time, unable to log hours")
             

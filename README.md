@@ -1,6 +1,6 @@
 # ClickUp Task Time Tracker
 
-This is a desktop application built using Python and Tkinter for tracking and logging time spent on ClickUp tasks. The app allows users to manually log hours or track time automatically using start and stop buttons for each task.
+This is a desktop application built using Python and Tkinter for tracking time spent on ClickUp tasks. The app reads tasks from ClickUp and saves time entries to Supabase, so it can be used even when ClickUp's Free plan time tracking limits are reached.
 
 ## Features
 
@@ -8,7 +8,9 @@ This is a desktop application built using Python and Tkinter for tracking and lo
 - **Manual Hour Logging**: Allows users to input hours worked on a task and log them manually.
 - **Automatic Time Tracking**: Users can start and stop a timer to automatically track time for each task.
 - **Task Timer**: Displays the elapsed time for each task while tracking.
-- **ClickUp Integration**: Connects to the ClickUp API to retrieve tasks and log time entries.
+- **ClickUp Integration**: Connects to the ClickUp API to retrieve tasks.
+- **Supabase Storage**: Saves manual and timer-based time entries to Supabase.
+- **Power BI Reporting**: Supabase data can be consumed by Power BI through the PostgreSQL connector.
 - **User Authentication**: Users can input their ClickUp API token to access their tasks.
 
 ## Installation
@@ -33,10 +35,12 @@ pip install tkinter
 `pyinstaller --onefile --noconsole clickup.py`
 
 ## Usage
-### 1. Input ClickUp API Token
-When you first open the application, it will prompt you to enter your ClickUp API token.
+### 1. Configure ClickUp and Supabase
+When you first open the application, it will prompt you to enter your ClickUp API token, Supabase project URL, and Supabase anon key.
 This token can be obtained from your ClickUp account settings under Apps.
-Once entered, the token is saved locally, and the list of your "In Progress" tasks will be fetched.
+The Supabase values can be found in your Supabase project settings. Use the project URL in the format `https://your-project-ref.supabase.co`, without `/rest/v1` or any extra path. Once entered, the values are saved locally, and the list of your "In Progress" tasks will be fetched from ClickUp.
+
+Before logging hours, run `supabase_schema.sql` in the Supabase SQL editor.
 
 ### 2. Viewing Tasks
 The main screen displays all your tasks that are currently in progress.
@@ -51,19 +55,23 @@ Elapsed Time counter
 To manually log hours for a task:
 Input the number of hours in the Manual Hours field.
 Click the Manual Hours button.
-If successful, a confirmation message will appear and the input field will clear automatically.
+If successful, the entry is saved to Supabase and a confirmation message will appear.
 
 ### 4. Time Tracking
 To track time automatically:
 Click Start next to the task you want to track.
 The elapsed time will begin counting.
-Click Stop to stop tracking, and the time will be logged to ClickUp automatically.
+Click Stop to stop tracking, and the time will be saved to Supabase automatically.
 
 ### 5. Feedback
 The application provides feedback for actions such as:
-Success: When hours are logged successfully.
+Success: When hours are saved successfully.
 Failure: When logging fails (e.g., due to overlap with another time entry).
 Validation Errors: If invalid input is provided (e.g., non-numeric hours).
+
+## Power BI
+
+Power BI can connect to the Supabase Postgres database using the PostgreSQL connector. For reporting, use the `powerbi_time_entries` view created by `supabase_schema.sql`.
 
 ### 6. Closing the Application
 You can close the application by clicking the window’s close button.
